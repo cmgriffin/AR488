@@ -1,5 +1,6 @@
 from time import sleep
 import pyvisa
+from pyvisa.constants import BufferOperation
 
 rm = pyvisa.ResourceManager()
 
@@ -19,7 +20,7 @@ class Ar488:
     BAUD_RATE = 115200
     instance = None
 
-    def __init__(self, address):
+    def __init__(self, address, **kwargs):
         """
         Creats an instance of a low level driver for the Open Source AR488 USB
         to GPIB adapter. This driver should also be mostly compatible with the
@@ -31,25 +32,49 @@ class Ar488:
         """
         self.address = address
         self.instrument = rm.open_resource(address)
-        sleep(2)  # time for the arduino bootloader to timeout
+        # sleep(2)  # time for the arduino bootloader to timeout
         self.instrument.read_termination = self.READ_TERMINATION
         self.instrument.write_termination = self.WRITE_TERMINATION
         self.instrument.baud_rate = self.BAUD_RATE
+        self.timeout = kwargs.get("timeout", 5000)
         self.mode = 1  # configure as the bus controller
         self.auto = 0  # configure for manual reads
-
-    def __del__(self):
-        self.instrument.close()
+        type(self).instance = self
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(address='{self.address}')"
 
+    def query(self, msg, cast_func=None, delay=0.0):
+        self.instrument.flush(BufferOperation.discard_receive_buffer)
+        self.instrument.write(msg)
+        sleep(delay)
+        if cast_func is None:
+            return self.instrument.read_raw()
+        else:
+            return cast_func(self.instrument.read())
+
+    @property
+    def timeout(self):
+        """
+        Specifies the timeout for the pyvisa serial instrument and also the
+        AR488
+        """
+        return self.instrument.timeout
+
+    @timeout.setter
+    def timeout(self, timeout):
+        if not (0 <= int(timeout) <= 32000):
+            raise ValueError("timeout must be 0 - 32000")
+        self.read_tmo_ms = timeout
+        self.instrument.timeout = timeout
+
     def close(self):
         self.instrument.close()
+        type(self).instance = None
 
     @property
     def version(self):
-        return self.instrument.query("++ver")
+        return self.query("++ver", str)
 
     @property
     def target_addr(self):
@@ -64,7 +89,7 @@ class Ar488:
         where 1-29 is a decimal number representing the primary GPIB address of
         the device.
         """
-        return self.instrument.query("++addr")
+        return self.query("++addr", int)
 
     @target_addr.setter
     def target_addr(self, target_addr):
@@ -84,7 +109,7 @@ class Ar488:
         Modes: controller, device
         valid settings: 0=device, 1=controller
         """
-        return self.instrument.query("++mode")
+        return self.query("++mode", int)
 
     @mode.setter
     def mode(self, mode: int):
@@ -107,7 +132,7 @@ class Ar488:
         where 0 disables and 1 enables automatically sending data to the
         controller
         """
-        return self.instrument.query("++auto")
+        return self.query("++auto", int)
 
     @auto.setter
     def auto(self, auto):
@@ -130,7 +155,7 @@ class Ar488:
         where 0 disables and 1 enables asserting EOI to signal the last
         character sent
         """
-        return self.instrument.query("++eoi")
+        return self.query("++eoi", int)
 
     @eoi.setter
     def eoi(self, eoi):
@@ -148,7 +173,7 @@ class Ar488:
         not affect data being received from the instrument.
         0=CR+LF, 1=CR, 2=LF, 3=none
         """
-        return self.instrument.query("++eos")
+        return self.query("++eos", int)
 
     @eos.setter
     def eos(self, eos):
@@ -167,7 +192,7 @@ class Ar488:
         where 0 disables and 1 enables sending the EOT character to the USB
         output
         """
-        return self.instrument.query("++eot_enable")
+        return self.query("++eot_enable", int)
 
     @eot_enable.setter
     def eot_enable(self, eot_enable):
@@ -185,7 +210,7 @@ class Ar488:
         ++eot_char [<char>]
         where <char> is a decimal number that is less than 256.
         """
-        return self.instrument.query("++eot_char")
+        return self.query("++eot_char", int)
 
     @eot_char.setter
     def eot_char(self, eot_char):
@@ -206,7 +231,7 @@ class Ar488:
         ++lon [0 |1]
         where 0=disabled; 1=enabled
         """
-        return self.instrument.query("++lon")
+        return self.query("++lon", int)
 
     @lon.setter
     def lon(self, lon):
@@ -225,7 +250,7 @@ class Ar488:
         where <time> is a decimal number between 0 and 32000 representing
         milliseconds
         """
-        return self.instrument.query("++read_tmo_ms")
+        return self.query("++read_tmo_ms", int)
 
     @read_tmo_ms.setter
     def read_tmo_ms(self, read_tmo_ms):
@@ -239,7 +264,7 @@ class Ar488:
         This command returns the present status of the SRQ signal line. It
         returns 0 if SRQ is not asserted and 1 if SRQ is asserted.
         """
-        return self.instrument.query("++sqr")
+        return self.query("++sqr", int)
 
     def send_clr(self):
         """
@@ -373,25 +398,8 @@ class Ar488:
         Returns:
             str: [description]
         """
-        self.instrument.write("++read")
-        return self.instrument.read_raw()
 
-    def read_bytes(self, count):
-        """
-        This command can be used to read data from the currently addressed instrument. Data is read
-        until:
-        - the EOI signal is detected
-        - a specified character is read
-        - timeout expires
-        Timeout is set using the read_tmo_ms command and is the maximum permitted delay for a single
-        character to be read. It is not related to the time taken to read all of the data. For details see the
-        description of the read_tmo_ms command.
-
-        Returns:
-            bytes
-        """
-        self.instrument.write("++read")
-        return self.instrument.read_bytes(count)
+        return self.query("++read")
 
 
 class Ar488Inst:
@@ -442,7 +450,7 @@ class Ar488Inst:
         Initilizes the Ar488 if necessary then gets the instance.
         """
         if Ar488.instance is None:  # need to initialize the adapter
-            Ar488.instance = Ar488(self._ar488_port)
+            Ar488(self._ar488_port)
         self.interface = Ar488.instance
 
     def close(self):
